@@ -1,5 +1,5 @@
 const { Telegraf } = require('telegraf');
-const axios = require('axios');
+const https = require('https');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 const fs = require('fs');
@@ -48,7 +48,7 @@ Powered by @KaIi_Linux_BOT
 
 Send me a video, and I’ll compress it for you with balanced quality! 🚀
 
-⚠️ Note: Videos must be under 50 MB and 30 seconds (Vercel limits). Compressed video will also be under 50 MB.
+⚠️ Note: Videos must be under 20 MB and 20 seconds (Vercel limits). Compressed video will also be under 20 MB.
   `, { parse_mode: 'Markdown' }).catch((err) => {
     console.error('Failed to send /start message:', err.message);
   });
@@ -71,7 +71,7 @@ async function getFileWithRetry(telegram, fileId, maxRetries = 3) {
   }
 }
 
-// Function to download a video from Telegram with retry logic
+// Function to download a video from Telegram using https with retry logic
 async function downloadVideo(fileId, ctx) {
   const maxRetries = 3;
   let attempt = 0;
@@ -83,8 +83,8 @@ async function downloadVideo(fileId, ctx) {
   const file = await getFileWithRetry(ctx.telegram, fileId);
 
   // Check file size before downloading
-  if (file.file_size > 50 * 1024 * 1024) {
-    throw new Error('Video is too large (>50 MB). Telegram limits uploads to 50 MB.');
+  if (file.file_size > 20 * 1024 * 1024) {
+    throw new Error('Video is too large (>20 MB). Vercel limits downloads to 20 MB for faster processing.');
   }
 
   const fileUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
@@ -92,19 +92,35 @@ async function downloadVideo(fileId, ctx) {
 
   while (attempt < maxRetries) {
     try {
-      const response = await axios({
-        url: fileUrl,
-        method: 'GET',
-        responseType: 'stream',
-        timeout: 15000 // 15-second timeout for download
-      });
-
-      const writer = fs.createWriteStream(filePath);
-      response.data.pipe(writer);
-
       return await new Promise((resolve, reject) => {
-        writer.on('finish', () => resolve(filePath));
-        writer.on('error', (err) => reject(err));
+        const fileStream = fs.createWriteStream(filePath);
+        const request = https.get(fileUrl, { timeout: 30000 }, (response) => {
+          response.pipe(fileStream);
+          fileStream.on('finish', () => {
+            fileStream.close();
+            resolve(filePath);
+          });
+        });
+
+        request.on('error', (err) => {
+          fileStream.close();
+          fs.unlinkSync(filePath);
+          reject(err);
+        });
+
+        fileStream.on('error', (err) => {
+          fileStream.close();
+          fs.unlinkSync(filePath);
+          reject(err);
+        });
+
+        // Timeout for the request
+        request.setTimeout(30000, () => {
+          request.destroy();
+          fileStream.close();
+          fs.unlinkSync(filePath);
+          reject(new Error('Download timeout of 30 seconds exceeded'));
+        });
       });
     } catch (error) {
       attempt++;
@@ -129,14 +145,14 @@ async function compressVideo(inputPath) {
       .fps(24) // 24 fps
       .audioCodec('aac')
       .audioBitrate('128k') // 128 kbps audio
-      .addOption('-preset', 'medium') // Balanced speed and quality
+      .addOption('-preset', 'faster') // Faster preset for quicker compression
       .addOption('-crf', '23') // Lower CRF for better quality
       .on('end', () => {
         // Check file size after compression
         const stats = fs.statSync(outputPath);
-        if (stats.size > 50 * 1024 * 1024) {
+        if (stats.size > 20 * 1024 * 1024) {
           fs.unlinkSync(outputPath);
-          reject(new Error('Compressed video is still too large (>50 MB).'));
+          reject(new Error('Compressed video is still too large (>20 MB).'));
         } else {
           resolve(outputPath);
         }
@@ -146,11 +162,11 @@ async function compressVideo(inputPath) {
       })
       .save(outputPath);
 
-    // Timeout for FFmpeg (45 seconds)
+    // Timeout for FFmpeg (30 seconds)
     setTimeout(() => {
       ffmpegProcess.kill('SIGKILL');
-      reject(new Error('Video compression timed out after 45 seconds.'));
-    }, 45000);
+      reject(new Error('Video compression timed out after 30 seconds.'));
+    }, 30000);
   });
 }
 
@@ -201,8 +217,8 @@ bot.on('video', async (ctx) => {
   let outputPath = null;
 
   // Check video duration (Vercel limitation)
-  if (duration > 30) {
-    await sendMessageWithRetry(ctx, '❌ Video is too long (>30 seconds). Please send a shorter video.');
+  if (duration > 20) {
+    await sendMessageWithRetry(ctx, '❌ Video is too long (>20 seconds). Please send a shorter video.');
     return;
   }
 
@@ -213,7 +229,6 @@ bot.on('video', async (ctx) => {
   setImmediate(async () => {
     try {
       // Step 1: Download the video
-      await sendMessageWithRetry(ctx, 'Downloading video... 📥');
       inputPath = await downloadVideo(fileId, ctx);
 
       // Step 2: Compress the video

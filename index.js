@@ -1,12 +1,5 @@
 const { Telegraf } = require('telegraf');
-const https = require('https');
-const ffmpeg = require('fluent-ffmpeg');
-const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
-const fs = require('fs');
-const path = require('path');
-
-// Set FFmpeg path for fluent-ffmpeg
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+const axios = require('axios');
 
 // Get the bot token from environment variable
 const botToken = process.env.TOKEN;
@@ -17,6 +10,9 @@ if (!botToken) {
 }
 
 const bot = new Telegraf(botToken);
+
+// API endpoint
+const API_URL = 'https://ar-api-08uk.onrender.com/uphd';
 
 // Simple rate limiter to prevent hitting Telegram API limits
 const rateLimit = new Map();
@@ -41,133 +37,60 @@ function checkRateLimit(chatId) {
 }
 
 // Introduction message on /start
-bot.start((ctx) => {
-  ctx.reply(`
-🎥 *Video Compressor Bot* 🎥
+bot.start(async (ctx) => {
+  await ctx.reply(`
+🎨 *Wallpaper Download Bot* 🎨
 Powered by @KaIi_Linux_BOT
 
-Send me a video, and I’ll compress it for you with balanced quality! 🚀
+Send me a query (e.g., "nature", "space", "anime"), and I’ll fetch high-quality wallpapers for you! 🚀
 
-⚠️ Note: Videos must be under 20 MB and 20 seconds (Vercel limits). Compressed video will also be under 20 MB.
+I’ll send each wallpaper as a photo with its URL and details.
   `, { parse_mode: 'Markdown' }).catch((err) => {
     console.error('Failed to send /start message:', err.message);
   });
 });
 
-// Function to get file info with retry logic
-async function getFileWithRetry(telegram, fileId, maxRetries = 3) {
+// Function to fetch wallpapers from the API with retry logic
+async function fetchWallpapers(query, maxRetries = 3) {
   let attempt = 0;
   while (attempt < maxRetries) {
     try {
-      return await telegram.getFile(fileId, { timeout: 10000 }); // 10-second timeout for getFile
-    } catch (error) {
-      attempt++;
-      if (attempt === maxRetries) {
-        throw new Error('Failed to get file info after retries: ' + error.message);
-      }
-      console.error(`getFile attempt ${attempt} failed: ${error.message}. Retrying...`);
-      await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
-    }
-  }
-}
-
-// Function to download a video from Telegram using https with retry logic
-async function downloadVideo(fileId, ctx) {
-  const maxRetries = 3;
-  let attempt = 0;
-
-  // Check rate limit
-  checkRateLimit(ctx.chat.id);
-
-  // Get file info
-  const file = await getFileWithRetry(ctx.telegram, fileId);
-
-  // Check file size before downloading
-  if (file.file_size > 20 * 1024 * 1024) {
-    throw new Error('Video is too large (>20 MB). Vercel limits downloads to 20 MB for faster processing.');
-  }
-
-  const fileUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
-  const filePath = path.join(__dirname, `input-${Date.now()}.mp4`);
-
-  while (attempt < maxRetries) {
-    try {
-      return await new Promise((resolve, reject) => {
-        const fileStream = fs.createWriteStream(filePath);
-        const request = https.get(fileUrl, { timeout: 30000 }, (response) => {
-          response.pipe(fileStream);
-          fileStream.on('finish', () => {
-            fileStream.close();
-            resolve(filePath);
-          });
-        });
-
-        request.on('error', (err) => {
-          fileStream.close();
-          fs.unlinkSync(filePath);
-          reject(err);
-        });
-
-        fileStream.on('error', (err) => {
-          fileStream.close();
-          fs.unlinkSync(filePath);
-          reject(err);
-        });
-
-        // Timeout for the request
-        request.setTimeout(30000, () => {
-          request.destroy();
-          fileStream.close();
-          fs.unlinkSync(filePath);
-          reject(new Error('Download timeout of 30 seconds exceeded'));
-        });
+      const response = await axios.get(API_URL, {
+        params: { query },
+        timeout: 10000 // 10-second timeout for API request
       });
+      return response.data;
     } catch (error) {
       attempt++;
       if (attempt === maxRetries) {
-        throw new Error('Failed to download video after retries: ' + error.message);
+        throw new Error('Failed to fetch wallpapers after retries: ' + error.message);
       }
-      console.error(`Download attempt ${attempt} failed: ${error.message}. Retrying...`);
+      console.error(`Fetch wallpapers attempt ${attempt} failed: ${error.message}. Retrying...`);
       await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
     }
   }
 }
 
-// Function to compress the video using FFmpeg with balanced settings
-async function compressVideo(inputPath) {
-  const outputPath = path.join(__dirname, `output-${Date.now()}.mp4`);
-
-  return new Promise((resolve, reject) => {
-    const ffmpegProcess = ffmpeg(inputPath)
-      .videoCodec('libx264')
-      .videoBitrate('1M') // 1 Mbps bitrate for better quality
-      .size('960x540') // Scale to 540p
-      .fps(24) // 24 fps
-      .audioCodec('aac')
-      .audioBitrate('128k') // 128 kbps audio
-      .addOption('-preset', 'faster') // Faster preset for quicker compression
-      .addOption('-crf', '23') // Lower CRF for better quality
-      .on('end', () => {
-        // Check file size after compression
-        const stats = fs.statSync(outputPath);
-        if (stats.size > 20 * 1024 * 1024) {
-          fs.unlinkSync(outputPath);
-          reject(new Error('Compressed video is still too large (>20 MB).'));
-        } else {
-          resolve(outputPath);
-        }
-      })
-      .on('error', (err) => {
-        reject(new Error('Failed to compress video: ' + err.message));
-      })
-      .save(outputPath);
-
-    // Timeout for FFmpeg (30 seconds)
-    setTimeout(() => {
-      ffmpegProcess.kill('SIGKILL');
-      reject(new Error('Video compression timed out after 30 seconds.'));
-    }, 30000);
-  });
+// Function to send a photo with retry logic
+async function sendPhotoWithRetry(ctx, photoUrl, caption, maxRetries = 3) {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      // Truncate caption if it exceeds Telegram's 1024-character limit
+      if (caption.length > 1024) {
+        caption = caption.substring(0, 1020) + '...';
+      }
+      await ctx.replyWithPhoto(photoUrl, { caption, parse_mode: 'Markdown' });
+      return;
+    } catch (error) {
+      attempt++;
+      if (attempt === maxRetries) {
+        throw new Error('Failed to send photo after retries: ' + error.message);
+      }
+      console.error(`Send photo attempt ${attempt} failed: ${error.message}. Retrying...`);
+      await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
+    }
+  }
 }
 
 // Function to send a message with retry logic
@@ -175,7 +98,7 @@ async function sendMessageWithRetry(ctx, message, maxRetries = 3) {
   let attempt = 0;
   while (attempt < maxRetries) {
     try {
-      await ctx.reply(message);
+      await ctx.reply(message, { parse_mode: 'Markdown' });
       return;
     } catch (error) {
       attempt++;
@@ -189,64 +112,64 @@ async function sendMessageWithRetry(ctx, message, maxRetries = 3) {
   }
 }
 
-// Function to send a video with retry logic
-async function sendVideoWithRetry(ctx, videoPath, maxRetries = 3) {
-  let attempt = 0;
-  while (attempt < maxRetries) {
-    try {
-      // Show "uploading video" status to the user
-      await ctx.telegram.sendChatAction(ctx.chat.id, 'upload_video');
-      await ctx.replyWithVideo({ source: videoPath });
-      return;
-    } catch (error) {
-      attempt++;
-      if (attempt === maxRetries) {
-        throw new Error('Failed to send video after retries: ' + error.message);
-      }
-      console.error(`Send video attempt ${attempt} failed: ${error.message}. Retrying...`);
-      await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
-    }
-  }
-}
+// Handle incoming text messages (non-blocking)
+bot.on('text', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const query = ctx.message.text.trim();
 
-// Handle incoming videos (non-blocking)
-bot.on('video', async (ctx) => {
-  const fileId = ctx.message.video.file_id;
-  const duration = ctx.message.video.duration; // Duration in seconds
-  let inputPath = null;
-  let outputPath = null;
-
-  // Check video duration (Vercel limitation)
-  if (duration > 20) {
-    await sendMessageWithRetry(ctx, '❌ Video is too long (>20 seconds). Please send a shorter video.');
+  // Check rate limit
+  try {
+    checkRateLimit(chatId);
+  } catch (error) {
+    await sendMessageWithRetry(ctx, `❌ ${error.message}`);
     return;
   }
 
-  // Send "Processing..." message immediately
-  await sendMessageWithRetry(ctx, 'Processing your video... ⏳');
+  // Send "Fetching..." message immediately
+  await sendMessageWithRetry(ctx, 'Fetching wallpapers... ⏳');
 
-  // Process the video compression in a non-blocking way
+  // Process the API request in a non-blocking way
   setImmediate(async () => {
     try {
-      // Step 1: Download the video
-      inputPath = await downloadVideo(fileId, ctx);
+      // Fetch wallpapers from the API
+      const response = await fetchWallpapers(query);
 
-      // Step 2: Compress the video
-      await sendMessageWithRetry(ctx, 'Compressing video... 🎬');
-      outputPath = await compressVideo(inputPath);
+      // Check if the API response is valid
+      if (response.status !== 200 || response.successful !== 'success' || !Array.isArray(response.data)) {
+        throw new Error('Invalid API response. Please try a different query.');
+      }
 
-      // Step 3: Send the compressed video
-      await sendMessageWithRetry(ctx, 'Sending compressed video... 🚀');
-      await sendVideoWithRetry(ctx, outputPath);
+      const wallpapers = response.data;
 
-      // Clean up
-      fs.unlinkSync(inputPath);
-      fs.unlinkSync(outputPath);
+      if (wallpapers.length === 0) {
+        await sendMessageWithRetry(ctx, '❌ No wallpapers found for your query. Try something else (e.g., "nature", "space", "anime").');
+        return;
+      }
+
+      // Send each wallpaper as a photo with its URL and details
+      for (const wallpaper of wallpapers) {
+        try {
+          const caption = `
+*${wallpaper.title}*  
+Resolution: ${wallpaper.resolution}  
+[Image URL](${wallpaper.imageUrl})  
+[View Full Details](${wallpaper.link})
+          `;
+          await sendPhotoWithRetry(ctx, wallpaper.imageUrl, caption);
+          // Add a small delay to avoid hitting Telegram's rate limits
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        } catch (error) {
+          await sendMessageWithRetry(ctx, `❌ Failed to send a wallpaper: ${error.message}`);
+        }
+      }
+
+      // Send the Join link if available
+      if (response.Join) {
+        await sendMessageWithRetry(ctx, `Join the community: [Ashlynn Repository](${response.Join})`);
+      }
     } catch (error) {
-      // Clean up files if they exist
-      if (inputPath && fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-      if (outputPath && fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-      await sendMessageWithRetry(ctx, '❌ Error: ' + error.message);
+      console.error('Error:', error.message);
+      await sendMessageWithRetry(ctx, `❌ Sorry, I couldn’t fetch wallpapers. Error: ${error.message}\nTry a different query or check back later.`);
     }
   });
 });

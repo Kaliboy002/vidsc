@@ -24,9 +24,9 @@ bot.start((ctx) => {
 🎥 *Video Compressor Bot* 🎥
 Powered by @KaIi_Linux_BOT
 
-Send me a video, and I’ll compress it for you while keeping decent quality! 🚀
+Send me a video, and I’ll compress it for you with balanced quality! 🚀
 
-⚠️ Note: Videos must be under 50 MB and 60 seconds (Telegram and Vercel limits). Compressed video will also be under 50 MB.
+⚠️ Note: Videos must be under 50 MB and 30 seconds (Vercel limits). Compressed video will also be under 50 MB.
   `, { parse_mode: 'Markdown' }).catch((err) => {
     console.error('Failed to send /start message:', err.message);
   });
@@ -68,20 +68,20 @@ async function downloadVideo(fileId, ctx) {
   }
 }
 
-// Function to compress the video using FFmpeg with optimized settings
+// Function to compress the video using FFmpeg with balanced settings
 async function compressVideo(inputPath) {
   const outputPath = path.join(__dirname, `output-${Date.now()}.mp4`);
 
   return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
+    const ffmpegProcess = ffmpeg(inputPath)
       .videoCodec('libx264')
-      .videoBitrate('500k') // Lower bitrate to 500 kbps for faster compression
-      .size('960x540') // Scale to 540p (smaller resolution for faster processing)
-      .fps(24) // 24 fps to reduce size
+      .videoBitrate('1M') // 1 Mbps bitrate for better quality
+      .size('960x540') // Scale to 540p
+      .fps(24) // 24 fps
       .audioCodec('aac')
-      .audioBitrate('96k') // Lower audio bitrate to 96 kbps
-      .addOption('-preset', 'ultrafast') // Use ultrafast preset for faster compression
-      .addOption('-crf', '28') // Higher CRF for smaller size (28 is a good balance)
+      .audioBitrate('128k') // 128 kbps audio
+      .addOption('-preset', 'medium') // Balanced speed and quality
+      .addOption('-crf', '23') // Lower CRF for better quality
       .on('end', () => {
         // Check file size after compression
         const stats = fs.statSync(outputPath);
@@ -96,6 +96,12 @@ async function compressVideo(inputPath) {
         reject(new Error('Failed to compress video: ' + err.message));
       })
       .save(outputPath);
+
+    // Timeout for FFmpeg (45 seconds)
+    setTimeout(() => {
+      ffmpegProcess.kill('SIGKILL');
+      reject(new Error('Video compression timed out after 45 seconds.'));
+    }, 45000);
   });
 }
 
@@ -118,6 +124,26 @@ async function sendMessageWithRetry(ctx, message, maxRetries = 3) {
   }
 }
 
+// Function to send a video with retry logic
+async function sendVideoWithRetry(ctx, videoPath, maxRetries = 3) {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      // Show "uploading video" status to the user
+      await ctx.telegram.sendChatAction(ctx.chat.id, 'upload_video');
+      await ctx.replyWithVideo({ source: videoPath });
+      return;
+    } catch (error) {
+      attempt++;
+      if (attempt === maxRetries) {
+        throw new Error('Failed to send video after retries: ' + error.message);
+      }
+      console.error(`Send video attempt ${attempt} failed: ${error.message}. Retrying...`);
+      await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
+    }
+  }
+}
+
 // Handle incoming videos (non-blocking)
 bot.on('video', async (ctx) => {
   const fileId = ctx.message.video.file_id;
@@ -126,8 +152,8 @@ bot.on('video', async (ctx) => {
   let outputPath = null;
 
   // Check video duration (Vercel limitation)
-  if (duration > 60) {
-    await sendMessageWithRetry(ctx, '❌ Video is too long (>60 seconds). Please send a shorter video.');
+  if (duration > 30) {
+    await sendMessageWithRetry(ctx, '❌ Video is too long (>30 seconds). Please send a shorter video.');
     return;
   }
 
@@ -153,7 +179,7 @@ bot.on('video', async (ctx) => {
 
       // Step 3: Send the compressed video
       await sendMessageWithRetry(ctx, 'Sending compressed video... 🚀');
-      await ctx.replyWithVideo({ source: outputPath });
+      await sendVideoWithRetry(ctx, outputPath);
 
       // Clean up
       fs.unlinkSync(inputPath);

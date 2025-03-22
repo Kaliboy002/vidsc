@@ -26,48 +26,62 @@ Powered by @KaIi_Linux_BOT
 
 Send me a video, and I’ll compress it for you while keeping decent quality! 🚀
 
-⚠️ Note: Videos must be under 50 MB (Telegram limit), and the compressed video will also be under 50 MB.
-  `, { parse_mode: 'Markdown' });
+⚠️ Note: Videos must be under 50 MB and 60 seconds (Telegram and Vercel limits). Compressed video will also be under 50 MB.
+  `, { parse_mode: 'Markdown' }).catch((err) => {
+    console.error('Failed to send /start message:', err.message);
+  });
 });
 
-// Function to download a video from Telegram
+// Function to download a video from Telegram with retry logic
 async function downloadVideo(fileId, ctx) {
-  try {
-    const file = await ctx.telegram.getFile(fileId);
-    const fileUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
-    const filePath = path.join(__dirname, `input-${Date.now()}.mp4`);
+  const maxRetries = 3;
+  let attempt = 0;
 
-    const response = await axios({
-      url: fileUrl,
-      method: 'GET',
-      responseType: 'stream',
-      timeout: 15000 // 15-second timeout for download
-    });
+  while (attempt < maxRetries) {
+    try {
+      const file = await ctx.telegram.getFile(fileId);
+      const fileUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
+      const filePath = path.join(__dirname, `input-${Date.now()}.mp4`);
 
-    const writer = fs.createWriteStream(filePath);
-    response.data.pipe(writer);
+      const response = await axios({
+        url: fileUrl,
+        method: 'GET',
+        responseType: 'stream',
+        timeout: 15000 // 15-second timeout for download
+      });
 
-    return new Promise((resolve, reject) => {
-      writer.on('finish', () => resolve(filePath));
-      writer.on('error', (err) => reject(err));
-    });
-  } catch (error) {
-    throw new Error('Failed to download video: ' + error.message);
+      const writer = fs.createWriteStream(filePath);
+      response.data.pipe(writer);
+
+      return await new Promise((resolve, reject) => {
+        writer.on('finish', () => resolve(filePath));
+        writer.on('error', (err) => reject(err));
+      });
+    } catch (error) {
+      attempt++;
+      if (attempt === maxRetries) {
+        throw new Error('Failed to download video after retries: ' + error.message);
+      }
+      console.error(`Download attempt ${attempt} failed: ${error.message}. Retrying...`);
+      await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
+    }
   }
 }
 
-// Function to compress the video using FFmpeg
+// Function to compress the video using FFmpeg with optimized settings
 async function compressVideo(inputPath) {
   const outputPath = path.join(__dirname, `output-${Date.now()}.mp4`);
 
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
-      .videoCodec('libx264') // Use H.264 codec for efficient compression
-      .videoBitrate('1M') // Set video bitrate to 1 Mbps (adjustable)
-      .size('1280x720') // Scale to 720p (adjustable)
-      .fps(24) // Reduce frame rate to 24 fps
-      .audioCodec('aac') // Use AAC for audio
-      .audioBitrate('128k') // Set audio bitrate to 128 kbps
+      .videoCodec('libx264')
+      .videoBitrate('500k') // Lower bitrate to 500 kbps for faster compression
+      .size('960x540') // Scale to 540p (smaller resolution for faster processing)
+      .fps(24) // 24 fps to reduce size
+      .audioCodec('aac')
+      .audioBitrate('96k') // Lower audio bitrate to 96 kbps
+      .addOption('-preset', 'ultrafast') // Use ultrafast preset for faster compression
+      .addOption('-crf', '28') // Higher CRF for smaller size (28 is a good balance)
       .on('end', () => {
         // Check file size after compression
         const stats = fs.statSync(outputPath);
@@ -85,20 +99,46 @@ async function compressVideo(inputPath) {
   });
 }
 
+// Function to send a message with retry logic
+async function sendMessageWithRetry(ctx, message, maxRetries = 3) {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      await ctx.reply(message);
+      return;
+    } catch (error) {
+      attempt++;
+      if (attempt === maxRetries) {
+        console.error(`Failed to send message after ${maxRetries} retries: ${error.message}`);
+        return;
+      }
+      console.error(`Send message attempt ${attempt} failed: ${error.message}. Retrying...`);
+      await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
+    }
+  }
+}
+
 // Handle incoming videos (non-blocking)
 bot.on('video', async (ctx) => {
   const fileId = ctx.message.video.file_id;
+  const duration = ctx.message.video.duration; // Duration in seconds
   let inputPath = null;
   let outputPath = null;
 
+  // Check video duration (Vercel limitation)
+  if (duration > 60) {
+    await sendMessageWithRetry(ctx, '❌ Video is too long (>60 seconds). Please send a shorter video.');
+    return;
+  }
+
   // Send "Processing..." message immediately
-  ctx.reply('Processing your video... ⏳').catch((err) => console.error('Failed to send processing message:', err));
+  await sendMessageWithRetry(ctx, 'Processing your video... ⏳');
 
   // Process the video compression in a non-blocking way
   setImmediate(async () => {
     try {
       // Step 1: Download the video
-      ctx.reply('Downloading video... 📥');
+      await sendMessageWithRetry(ctx, 'Downloading video... 📥');
       inputPath = await downloadVideo(fileId, ctx);
 
       // Check input file size
@@ -108,11 +148,11 @@ bot.on('video', async (ctx) => {
       }
 
       // Step 2: Compress the video
-      ctx.reply('Compressing video... 🎬');
+      await sendMessageWithRetry(ctx, 'Compressing video... 🎬');
       outputPath = await compressVideo(inputPath);
 
       // Step 3: Send the compressed video
-      ctx.reply('Sending compressed video... 🚀');
+      await sendMessageWithRetry(ctx, 'Sending compressed video... 🚀');
       await ctx.replyWithVideo({ source: outputPath });
 
       // Clean up
@@ -122,9 +162,14 @@ bot.on('video', async (ctx) => {
       // Clean up files if they exist
       if (inputPath && fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
       if (outputPath && fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-      ctx.reply('❌ Error: ' + error.message);
+      await sendMessageWithRetry(ctx, '❌ Error: ' + error.message);
     }
   });
+});
+
+// Handle unhandled rejections to prevent crashes
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 // Export the handler for Vercel
@@ -137,7 +182,7 @@ module.exports = async (req, res) => {
       res.status(200).send('Bot is running.');
     }
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error in Vercel handler:', error);
     res.status(500).json({ ok: false, error: error.message });
   }
 };

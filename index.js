@@ -18,6 +18,28 @@ if (!botToken) {
 
 const bot = new Telegraf(botToken);
 
+// Simple rate limiter to prevent hitting Telegram API limits
+const rateLimit = new Map();
+const RATE_LIMIT_REQUESTS = 30; // Telegram's limit: ~30 requests per second
+const RATE_LIMIT_WINDOW = 1000; // 1 second window
+
+function checkRateLimit(chatId) {
+  const now = Date.now();
+  const userRequests = rateLimit.get(chatId) || { count: 0, timestamp: now };
+
+  if (now - userRequests.timestamp > RATE_LIMIT_WINDOW) {
+    userRequests.count = 0;
+    userRequests.timestamp = now;
+  }
+
+  userRequests.count++;
+  rateLimit.set(chatId, userRequests);
+
+  if (userRequests.count > RATE_LIMIT_REQUESTS) {
+    throw new Error('Rate limit exceeded. Please wait a moment and try again.');
+  }
+}
+
 // Introduction message on /start
 bot.start((ctx) => {
   ctx.reply(`
@@ -32,17 +54,44 @@ Send me a video, and I’ll compress it for you with balanced quality! 🚀
   });
 });
 
+// Function to get file info with retry logic
+async function getFileWithRetry(telegram, fileId, maxRetries = 3) {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      return await telegram.getFile(fileId, { timeout: 10000 }); // 10-second timeout for getFile
+    } catch (error) {
+      attempt++;
+      if (attempt === maxRetries) {
+        throw new Error('Failed to get file info after retries: ' + error.message);
+      }
+      console.error(`getFile attempt ${attempt} failed: ${error.message}. Retrying...`);
+      await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
+    }
+  }
+}
+
 // Function to download a video from Telegram with retry logic
 async function downloadVideo(fileId, ctx) {
   const maxRetries = 3;
   let attempt = 0;
 
+  // Check rate limit
+  checkRateLimit(ctx.chat.id);
+
+  // Get file info
+  const file = await getFileWithRetry(ctx.telegram, fileId);
+
+  // Check file size before downloading
+  if (file.file_size > 50 * 1024 * 1024) {
+    throw new Error('Video is too large (>50 MB). Telegram limits uploads to 50 MB.');
+  }
+
+  const fileUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
+  const filePath = path.join(__dirname, `input-${Date.now()}.mp4`);
+
   while (attempt < maxRetries) {
     try {
-      const file = await ctx.telegram.getFile(fileId);
-      const fileUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
-      const filePath = path.join(__dirname, `input-${Date.now()}.mp4`);
-
       const response = await axios({
         url: fileUrl,
         method: 'GET',
@@ -166,12 +215,6 @@ bot.on('video', async (ctx) => {
       // Step 1: Download the video
       await sendMessageWithRetry(ctx, 'Downloading video... 📥');
       inputPath = await downloadVideo(fileId, ctx);
-
-      // Check input file size
-      const inputStats = fs.statSync(inputPath);
-      if (inputStats.size > 50 * 1024 * 1024) {
-        throw new Error('Input video is too large (>50 MB). Telegram limits uploads to 50 MB.');
-      }
 
       // Step 2: Compress the video
       await sendMessageWithRetry(ctx, 'Compressing video... 🎬');

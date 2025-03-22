@@ -1,4 +1,4 @@
-const { Telegraf } = require('telegraf');
+const { Telegraf, Input } = require('telegraf');
 const axios = require('axios');
 
 // Get the bot token from environment variable
@@ -13,6 +13,9 @@ const bot = new Telegraf(botToken);
 
 // API endpoint
 const API_URL = 'https://ar-api-08uk.onrender.com/uphd';
+
+// In-memory cache for API responses
+const apiCache = new Map();
 
 // Simple rate limiter to prevent hitting Telegram API limits
 const rateLimit = new Map();
@@ -44,7 +47,7 @@ Powered by @KaIi_Linux_BOT
 
 Send me a query (e.g., "nature", "space", "anime"), and I’ll fetch high-quality wallpapers for you! 🚀
 
-I’ll send each wallpaper as a photo with its URL and details.
+I’ll send each wallpaper as a photo with its URL and details. All wallpapers will be sent quickly in batches.
   `, { parse_mode: 'Markdown' }).catch((err) => {
     console.error('Failed to send /start message:', err.message);
   });
@@ -52,13 +55,27 @@ I’ll send each wallpaper as a photo with its URL and details.
 
 // Function to fetch wallpapers from the API with retry logic
 async function fetchWallpapers(query, maxRetries = 3) {
+  // Check cache first
+  const cacheKey = query.toLowerCase();
+  if (apiCache.has(cacheKey)) {
+    return apiCache.get(cacheKey);
+  }
+
   let attempt = 0;
   while (attempt < maxRetries) {
     try {
       const response = await axios.get(API_URL, {
         params: { query },
-        timeout: 10000 // 10-second timeout for API request
+        timeout: 5000 // 5-second timeout for API request
       });
+
+      // Validate response
+      if (response.status !== 200 || response.data.status !== 200 || !Array.isArray(response.data.data)) {
+        throw new Error('Invalid API response');
+      }
+
+      // Cache the response
+      apiCache.set(cacheKey, response.data);
       return response.data;
     } catch (error) {
       attempt++;
@@ -66,29 +83,25 @@ async function fetchWallpapers(query, maxRetries = 3) {
         throw new Error('Failed to fetch wallpapers after retries: ' + error.message);
       }
       console.error(`Fetch wallpapers attempt ${attempt} failed: ${error.message}. Retrying...`);
-      await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
+      await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second before retrying
     }
   }
 }
 
-// Function to send a photo with retry logic
-async function sendPhotoWithRetry(ctx, photoUrl, caption, maxRetries = 3) {
+// Function to send a media group with retry logic
+async function sendMediaGroupWithRetry(ctx, media, maxRetries = 3) {
   let attempt = 0;
   while (attempt < maxRetries) {
     try {
-      // Truncate caption if it exceeds Telegram's 1024-character limit
-      if (caption.length > 1024) {
-        caption = caption.substring(0, 1020) + '...';
-      }
-      await ctx.replyWithPhoto(photoUrl, { caption, parse_mode: 'Markdown' });
+      await ctx.telegram.sendMediaGroup(ctx.chat.id, media);
       return;
     } catch (error) {
       attempt++;
       if (attempt === maxRetries) {
-        throw new Error('Failed to send photo after retries: ' + error.message);
+        throw new Error('Failed to send media group after retries: ' + error.message);
       }
-      console.error(`Send photo attempt ${attempt} failed: ${error.message}. Retrying...`);
-      await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
+      console.error(`Send media group attempt ${attempt} failed: ${error.message}. Retrying...`);
+      await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second before retrying
     }
   }
 }
@@ -107,15 +120,28 @@ async function sendMessageWithRetry(ctx, message, maxRetries = 3) {
         return;
       }
       console.error(`Send message attempt ${attempt} failed: ${error.message}. Retrying...`);
-      await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retrying
+      await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second before retrying
     }
   }
+}
+
+// Function to check if a wallpaper is relevant to the query
+function isWallpaperRelevant(query, wallpaper) {
+  const queryWords = query.toLowerCase().split(/\s+/);
+  const title = wallpaper.title.toLowerCase();
+  return queryWords.some(word => title.includes(word));
 }
 
 // Handle incoming text messages (non-blocking)
 bot.on('text', async (ctx) => {
   const chatId = ctx.chat.id;
-  const query = ctx.message.text.trim();
+  let query = ctx.message.text.trim();
+
+  // Validate query
+  if (!query || query.length < 3) {
+    await sendMessageWithRetry(ctx, '❌ Please provide a valid query (at least 3 characters). Try something like "nature", "space", or "anime".');
+    return;
+  }
 
   // Check rate limit
   try {
@@ -131,13 +157,11 @@ bot.on('text', async (ctx) => {
   // Process the API request in a non-blocking way
   setImmediate(async () => {
     try {
+      // Show "uploading photo" status
+      await ctx.telegram.sendChatAction(chatId, 'upload_photo');
+
       // Fetch wallpapers from the API
       const response = await fetchWallpapers(query);
-
-      // Check if the API response is valid
-      if (response.status !== 200 || response.successful !== 'success' || !Array.isArray(response.data)) {
-        throw new Error('Invalid API response. Please try a different query.');
-      }
 
       const wallpapers = response.data;
 
@@ -146,20 +170,54 @@ bot.on('text', async (ctx) => {
         return;
       }
 
-      // Send each wallpaper as a photo with its URL and details
-      for (const wallpaper of wallpapers) {
-        try {
-          const caption = `
+      // Check relevance of results
+      const relevantWallpapers = wallpapers.filter(wallpaper => isWallpaperRelevant(query, wallpaper));
+      if (relevantWallpapers.length === 0) {
+        await sendMessageWithRetry(ctx, '❌ The results don’t seem relevant to your query. Try a more specific term (e.g., "nature forest", "space galaxy", "anime girl").');
+        return;
+      }
+
+      // Prepare media groups (batches of up to 10 photos)
+      const mediaGroups = [];
+      let currentGroup = [];
+      for (const wallpaper of relevantWallpapers) {
+        const caption = `
 *${wallpaper.title}*  
 Resolution: ${wallpaper.resolution}  
 [Image URL](${wallpaper.imageUrl})  
 [View Full Details](${wallpaper.link})
-          `;
-          await sendPhotoWithRetry(ctx, wallpaper.imageUrl, caption);
-          // Add a small delay to avoid hitting Telegram's rate limits
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+        `.trim();
+
+        // Truncate caption if it exceeds Telegram's 1024-character limit
+        const truncatedCaption = caption.length > 1024 ? caption.substring(0, 1020) + '...' : caption;
+
+        currentGroup.push({
+          type: 'photo',
+          media: wallpaper.imageUrl,
+          caption: truncatedCaption,
+          parse_mode: 'Markdown'
+        });
+
+        if (currentGroup.length === 10) {
+          mediaGroups.push(currentGroup);
+          currentGroup = [];
+        }
+      }
+
+      // Add the last group if it has any items
+      if (currentGroup.length > 0) {
+        mediaGroups.push(currentGroup);
+      }
+
+      // Send each media group
+      for (const group of mediaGroups) {
+        try {
+          await sendMediaGroupWithRetry(ctx, group);
+          // Add a 2-second delay between groups to avoid hitting Telegram's rate limits
+          await new Promise((resolve) => setTimeout(resolve, 2000));
         } catch (error) {
-          await sendMessageWithRetry(ctx, `❌ Failed to send a wallpaper: ${error.message}`);
+          console.error(`Failed to send media group: ${error.message}`);
+          await sendMessageWithRetry(ctx, `❌ Failed to send some wallpapers: ${error.message}`);
         }
       }
 

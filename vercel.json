@@ -2,14 +2,22 @@
   "version": 2,
   "builds": [
     {
-      "src": "index.js",
+      "src": "maker.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "created.js",
       "use": "@vercel/node"
     }
   ],
   "routes": [
     {
+      "src": "/created(.*)",
+      "dest": "created.js"
+    },
+    {
       "src": "/(.*)",
-      "dest": "index.js"
+      "dest": "maker.js"
     }
   ]
 }

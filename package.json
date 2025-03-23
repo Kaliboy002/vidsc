@@ -1,12 +1,16 @@
 {
-  "name": "wallpaper-download-bot",
+  "name": "telegram-bot-maker",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "maker.js",
   "dependencies": {
-    "telegraf": "^4.12.2",
-    "axios": "^1.6.8"
+    "telegraf": "^4.16.3",
+    "mongoose": "^8.5.0",
+    "axios": "^1.7.2"
   },
   "engines": {
     "node": "18.x"
+  },
+  "scripts": {
+    "start": "node maker.js"
   }
 }

